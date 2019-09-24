@@ -1,0 +1,691 @@
+\documentclass[11pt]{article}
+\usepackage{fullpage}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amscd}
+\usepackage[tableposition=top]{caption}
+\usepackage{ifthen}
+\usepackage[utf8]{inputenc}
+\usepackage{subcaption}
+\usepackage[toc,page]{appendix}
+
+\setlength\parindent{0pt}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\title{Heroes of the Storm - A Clustering Experiment}
+\author{James Wu}
+\maketitle
+\clearpage
+
+\tableofcontents
+
+\clearpage
+
+<<echo=F>>=
+require(foreign)
+require(cluster)
+require(lattice)
+require(gtools)
+require(NbClust)
+PositionFeatures <- read.csv("../Data/PositionFeatures.csv")
+#remove the rows with any NAs for now:
+PositionFeatures <- PositionFeatures[!(is.na(PositionFeatures$BlueTeam.min) | is.na(PositionFeatures$RedTeam.min)),]
+
+#add personal labels
+PositionFeatures$TeamFight <- 0
+#SkirmishTimes <- c(38:48,80:90,108:118,130:140,180:195,198:216,267:300,317:327,341:350,384:400,621:631,640:650,787:797,803:840)
+#TeamfightTimes <- c(539:566,705:750,857:867,915:952,1000:1020,1146:1200)
+
+SkirmishTimes <- c(107:121,133:145,168:174,239:247,310:320,369:381,386:397,426:431,474:479,529:534,555:558,575:577,655:664,683:696,746:757,895:902,1074:1078,1110:1120)
+TeamfightTimes <- c(63:70,190:208,211:235,302:309,480:484,578:593,622:626,759:798,837:850,889:894,947:962,971:981,1033:1052,1080:1097,1183:1245)
+GankTimes <- c(102:108,248:252,347:356,720:725)
+
+PositionFeatures$TeamFight[PositionFeatures$TimeSpan %in% c(SkirmishTimes,TeamfightTimes)] <- 1
+@
+<<echo=F,eval=T>>=
+optLabel <- function(src,trg) {
+    #input two sets of labels, find permuation that maximizes agreement
+    #to be complete search, and handle simpler diag eval, trg must have larger # of labels
+    n1 <- length(unique(src))
+    n2 <- length(unique(trg))
+    if (n1>n2) {
+        optRslt <- optLabel(trg,src)
+        optRslt$best.tbl <- t(optRslt$best.tbl)
+        optRslt$match.by="rows"
+        return(optRslt)
+    }
+    tbl <- xtabs(~src+trg)
+    best.match <- sum(diag(tbl)) #still works for a non-square matrix.
+    best.perm <- 1:n2
+    allPerms <- permutations(n2,n2)
+    for (i in 1:dim(allPerms)[1]) {
+        cur.match <- sum(diag(tbl[,allPerms[i,]]))
+        if (cur.match>best.match) {
+            best.match <- cur.match
+            best.perm <- allPerms[i,]
+        }
+    }
+    list(match.by="cols",best.match=best.match,best.perm=best.perm,best.tbl=tbl[,best.perm])
+}
+@
+
+\section{Background}
+\subsection{Data}
+The data I'm using is a generated features list derived from a single match in Heroes of the Storm. Using the 1260 relational distance matrices (1 matrix for every second the game lasted), I extracted the minimum, maximum, and median Euclidian distance values for the Blue Team, Red Team, and the opposing team members. For now, I'm omitting all the rows of data that has NAs (times when only 1 or 0 people are alive in the same team). [will give more information here]
+\subsection{Goal}
+The goal of this study is to properly identify timepoints when teamfights and skirmishes occur. Given that there is no actual classification or labelling given to me, I watched the replay myself and determined when the skirmishes and teamfights are based on my own intuition. As a disclaimer, I found it very difficult sometimes to determine the difference between skirmishes and teamfights, and thought that most player interactions in the game I watched were more skirmishes than teamfights. As such, for now I will have all the timepoints I identified as 'teamfights' rather than skirmishes. Further refinement to my definition and the study will need to happen.
+
+\clearpage
+
+\section{Exploring the bivariate plots}
+
+First, we explore the pairwise plots to see whether there are any clusters that can be seen in the feature pairs. Then the densities of the pairs will be explored to see whether any feature is very skewed or need other transformations.
+
+\subsection{Pairwise Plot}
+
+<<Positionpairs, include=F>>=
+pairs(PositionFeatures[,2:9],pch=".")
+@
+
+\begin{figure}[h]
+\begin{center}
+<<label=fig1,fig=TRUE,echo=FALSE>>=
+<<Positionpairs>>
+@
+\end{center}
+\caption{Feature Pair Plots}
+\label{fig:one}
+\end{figure}
+
+Here, we do not see any separation to indicate clear clusters. 
+
+\clearpage
+
+<<Positiondensities,include=F,echo=F>>=
+par(mfrow=c(3,3))
+plot(density(PositionFeatures[,2]))
+plot(density(PositionFeatures[,3]))
+plot(density(PositionFeatures[,4]))
+plot(density(PositionFeatures[,5]))
+plot(density(PositionFeatures[,6]))
+plot(density(PositionFeatures[,7]))
+plot(density(PositionFeatures[,8]))
+plot(density(PositionFeatures[,9]))
+@
+
+\begin{figure}[h]
+\begin{center}
+<<label=fig2,fig=TRUE,echo=FALSE>>=
+<<Positiondensities>>
+@
+\end{center}
+\caption{Feature Densities}
+\label{fig:two}
+\end{figure}
+
+The minimum features are right skewed, and the median and maximum features seem to be multimodal. This is possibly be a good thing, and could mean that there may be clusters in those variables. Given that all of these variables are on the same scale, I will not be making any transformations.
+
+<<echo=F>>=
+PositionFeatures$logB.Min <- log(PositionFeatures$BlueTeam.min)
+PositionFeatures$logR.Min <- log(PositionFeatures$RedTeam.min)
+PositionFeatures$logO.Min <-  log(PositionFeatures$OppositeTeam.min)
+@
+
+
+\subsection{Principal Component Analysis}
+
+I want to see whether any clusters could be identified via PCA. We will naturally see strings of points due to time-dependent nature of the points. The minimums and medians of a single timepoint will be similar to the timepoint before it.  For now, I will be only looking at the minimums and medians because it's difficult to justify what maximums could represent without it being relative to something else.
+
+<<pcpairs,include=F>>=
+pc.positions <- princomp(PositionFeatures[,c(2:7),])$scores
+pairs(pc.positions,pch=".")
+@
+
+
+\begin{figure}[h]
+\begin{center}
+<<label=fig3,fig=TRUE,echo=FALSE>>=
+<<pcpairs>>
+@
+\end{center}
+\caption{Pairs in Principle Component Space}
+\label{fig:three}
+\end{figure}
+
+<<>>=
+princomp(PositionFeatures[,c(2:7)])$loading
+@
+
+Just looking at the PCA pairs, it seems there may be some clusters that could be unraveled. This will be explored in the following section. The loadings tell us that there isn't any space that only uses one specific metric (median or minimum), which is probably good.
+
+
+\section{Clustering}
+
+In this section, I will be exploring different clustering methods to use as a possible guide for the number of labels I may want to include for the classification analysis. Since each timepoint's features should be highly correlated with the previous timepoint, it may be useful to reduce the number of points by skipping every \textif{n} points. Doing so may improve the separation of the clusters and improve the results from the clustering methods.
+
+\subsection{Hierarchal Clustering}
+
+<<SingleLDendronoskip, include=F,echo=F>>=
+PF.single <- hclust(dist(PositionFeatures[,2:7]),meth='single')
+plot(PF.single,labels = FALSE, main='Single Linkage Dendogram',xlab='',sub="")
+@
+
+<<SingleLDendroskip, include=F,echo=F>>=
+PF.single.skip <- hclust(dist(PositionFeatures[,2:7][seq(1,nrow(PositionFeatures),5),]),meth='single')
+plot(PF.single.skip,labels = FALSE, main='Single Linkage Dendogram',xlab='',sub="")
+@
+
+<<CompleteLDendronoskip, include=F,echo=F>>=
+PF.complete <- hclust(dist(PositionFeatures[,2:7]),meth='complete')
+plot(PF.complete,labels = FALSE, main='Complete Linkage Dendogram',xlab='',sub="")
+abline(h = 113, col =2)
+@
+
+<<CompleteLDendroskip, include=F, echo=F>>=
+PF.complete.skip <- hclust(dist(PositionFeatures[,2:7][seq(1,nrow(PositionFeatures),5),]),meth='complete')
+plot(PF.complete.skip,labels = FALSE, main='Complete Linkage Dendogram',xlab='',sub="")
+@
+
+<<CentroidLDendronoskip, include=F,echo=F>>=
+PF.centroid <- hclust(dist(PositionFeatures[,2:7]),meth='centroid')
+plot(PF.centroid,labels = FALSE, main='Centroid Dendogram',xlab='',sub="")
+abline(h=29,col=2)
+@
+
+<<CentroidLDendroskip, include=F,echo=F>>=
+PF.centroid.skip <- hclust(dist(PositionFeatures[,2:7][seq(1,nrow(PositionFeatures),5),]),meth='centroid')
+plot(PF.centroid.skip,labels = FALSE, main='Centroid Dendogram',xlab='',sub="")
+@
+
+\begin{figure}[h]
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 1
+<<label=fig6,fig=TRUE,echo=FALSE>>=
+<<CompleteLDendronoskip>>
+@
+     \subcaption{Complete Linkage Dendrogram}\label{fig:1a}
+  \end{minipage}%
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 2
+<<label=fig7,fig=TRUE,echo=FALSE>>=
+<<CentroidLDendronoskip>>
+@
+     \subcaption{Centroid Clustering Dendrogram}\label{fig:1b}
+  \end{minipage}
+  \caption{Complete and Centroid Dendrograms}\label{fig:4}
+\end{figure}
+
+Both the complete linkage method and centroid clustering show many possible clusters - around 9/10 clusters from just looking at their dendrograms. The single linkage method predictably put most of the points in a single cluster (Appendix \ref{appendix:SLDendro}).\\
+
+When I only include every 5th point, the complete linkage's dendrogram did not change much, but the centroid dendogram drastically changed (Appendix \ref{appendix:5thPointDendros}).\\
+
+In an ideal clustering situation, we would observe small within group variance and large between group variance. An adequacy index was developed (C(g)) to better choose the optimal number of clusters. The larger the index is, the larger the ratio of the between group variance and the within, which represents the 'ideal clustering situation' mentioned earlier. \\
+
+These are the values of C(g) for different values of groups for these two methods:
+
+<<>>=
+lbl.complete <- NbClust(PositionFeatures[,2:7],method='complete',index='ch')
+lbl.centroid <- NbClust(PositionFeatures[,2:7],method='centroid',index='ch')
+@
+
+<<CompleteCg, include=F>>=
+plot(lbl.complete$All.index,type='l')
+@
+
+<<CentroidCg, include=F>>=
+plot(lbl.centroid$All.index,type='l')
+@
+
+\begin{figure}[h]
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 1
+<<label=fig8,fig=TRUE,echo=FALSE>>=
+<<CompleteCg>>
+@
+     \subcaption{Complete Linkage C(g)}\label{fig:1a}
+  \end{minipage}%
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 2
+<<label=fig9,fig=TRUE,echo=FALSE>>=
+<<CentroidCg>>
+@
+     \subcaption{Centroid Clustering C(g)}\label{fig:1b}
+  \end{minipage}
+  \caption{C(g) Criterion Plots}\label{fig:5}
+\end{figure}
+
+We see a maximal C(g) at 12 cluster in the Complete Linkage method, and a maximal C(g) at 3 clusters in the Centroid Clustering method. I cannot say which one is better for sure, but it seems as if the 3 cluster solution separates decently well in Principle Component Spaces 1 and 2.  The clusters revealed here could be interpreted as my theorized 3 things that happen at any one point: 'nothing', 'skirmish', and 'teamfight'. However, it's also very likely these are not the only things, which the complete linkage method reveals.
+
+<<CompletePairs, include=F>>=
+pairs(pc.positions[,1:3],col=rainbow(9)[lbl.complete$Best.partition],pch=".")
+@
+
+<<CentroidPairs, include=F>>=
+pairs(pc.positions[,1:3],col=rainbow(9)[lbl.centroid$Best.partition],pch=".")
+@
+
+\begin{figure}[h]
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 1
+<<label=comppairs,fig=TRUE,echo=FALSE>>=
+<<CompletePairs>>
+@
+     \subcaption{Complete Linkage maximal C(g) in PC space}
+  \end{minipage}%
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 2
+<<label=centpairs,fig=TRUE,echo=FALSE>>=
+<<CentroidPairs>>
+@
+     \subcaption{Centroid Clustering maximal C(g) in PC space}
+  \end{minipage}
+  \caption{Maximal C(g) labels pairs plot in PC space}
+\end{figure}
+
+\clearpage
+\subsection{k-means}
+k-means clustering is a popular clustering method aiming to partition $n$ observations into $k$ clusters, where each observation belongs to a cluster with the nearest mean. By applying this method to my dataset, I hope to compare its results to the centroid/complete clustering methods used earlier to see which method found similar clusters.
+
+<<kmeansCg, include=F>>=
+lbl.kmeans <- NbClust(PositionFeatures[,2:7],method='kmeans',index='ch')
+#lbl.kmeans.2 <- kmeans(PositionFeatures[,2:7],2)$cluster
+plot(lbl.kmeans$All.index,type='l')
+@
+
+The most optimal number of clusters according to the criterion, is at 4 clusters.
+
+<<mylabelspairs, include=F>>=
+#plot(pc.positions[,2:3],col=rainbow(9)[lbl.kmeans$Best.partition],cex=.75, main = "kmeans 4-clusters")
+pairs(pc.positions[,1:3],col=rainbow(9)[lbl.kmeans$Best.partition],pch=".")
+@
+
+\begin{figure}[h]
+\begin{center}
+<<label=fig4,fig=TRUE,echo=FALSE>>=
+<<mylabelspairs>>
+@
+\end{center}
+\caption{Kmeans labels in Principle Component Space}
+\label{fig:102}
+\end{figure}
+
+\clearpage
+
+\section{Exploration of Results}
+The next logical step in clustering here is seeing whether the clusters are actually clustered in any meaningful way. To do this, I will explore several position plots corresponding to the timepoints that were clustered in the optimal C(g). I will be focusing on the centroid clustering results and the kmeans, as they both have similar maximal g (3 and 4 respectively). I did a brief analysis on the Complete Linkage results, and you can find that in Appendix \ref{appendix:12ClusterGraph}
+
+The optimal number of timepoints these two methods agreed upon is the following:
+<<>>=
+optLabel(lbl.centroid$Best.partition,lbl.kmeans$Best.partition)$best.tbl
+@
+
+Here we see only 502 out of 1205 points are put in the same clusters by these two methods. While this is not great, in the two clusters they matched the most in, had only a total of 15 differences. It also may be worthwhile to see whether the methods produced clusters that could be interpretable for me.
+
+Here is the pairs graph after relabelling for optimal number of matches:
+<<>>=
+lbl.kmeans.opt <- lbl.kmeans$Best.partition
+lbl.kmeans.opt[which(lbl.kmeans$Best.partition == 1)] <- 2
+lbl.kmeans.opt[which(lbl.kmeans$Best.partition == 2)] <- 1
+lbl.kmeans.opt[which(lbl.kmeans$Best.partition == 3)] <- 4
+lbl.kmeans.opt[which(lbl.kmeans$Best.partition == 4)] <- 3
+@
+<<optpairskmeans, include = F>>=
+pairs(pc.positions[,1:3],col=rainbow(9)[lbl.kmeans.opt],pch=".")
+@
+
+\begin{figure}[h]
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 1
+<<fig=TRUE,echo=FALSE>>=
+<<CentroidPairs>>
+@
+     \subcaption{Centroid Clustering maximal C(g) in PC space}
+  \end{minipage}%
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 2
+<<fig=TRUE,echo=FALSE>>=
+<<optpairskmeans>>
+@
+     \subcaption{Kmeans maximal C(g) in PC space}
+  \end{minipage}
+  \caption{Maximal C(g) labels pairs plots in PC space}
+\end{figure}
+
+\clearpage
+
+\subsection{Centroid Clustering Results}
+C(g) had its absolute maximum at g = 3 clusters here. \\
+
+I will take 4 randomly-drawn sample of the TimePoints in each cluster:
+<<>>=
+ClusterSample <- function(methodlabels, numSample=1){
+  maxClust <- max(methodlabels)
+  Clustnum <- vector()
+  Sample <- matrix(rep(0,numSample*maxClust),nrow = numSample,ncol = maxClust)
+  
+  for(i in 1:maxClust){
+    Sample[,i] <- sample(names(methodlabels[methodlabels == i]),numSample,replace=F)
+  }
+  return(Sample)
+}
+@
+<<eval=F>>=
+set.seed(5)
+ClusterSample(lbl.centroid$Best.partition,4)
+@
+
+\clearpage
+
+\begin{figure}[h]
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 1
+  \includegraphics{Rplot11}
+     \subcaption{Cluster 1 - Frame 10}
+  \end{minipage}%
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 2
+  \includegraphics{Rplot31}
+     \subcaption{Cluster 2 - Frame 30}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 3
+  \includegraphics{Rplot1182}
+     \subcaption{Cluster 3 - Frame 1181}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 4
+  \includegraphics{Rplot15}
+     \subcaption{Cluster 1 - Frame 14}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 5
+  \includegraphics{Rplot1137}
+     \subcaption{Cluster 2 - Frame 1136}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 6
+  \includegraphics{Rplot159}
+     \subcaption{Cluster 3 - Frame 158}
+  \end{minipage}
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 7
+  \includegraphics{Rplot16}
+     \subcaption{Cluster 1 - Frame 15}
+  \end{minipage}%
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 8
+  \includegraphics{Rplot863}
+     \subcaption{Cluster 2 - Frame 862}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 9
+  \includegraphics{Rplot365}
+     \subcaption{Cluster 3 - Frame 364}
+  \end{minipage}
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 10
+  \includegraphics{Rplot10}
+     \subcaption{Cluster 1 - Frame 9}
+  \end{minipage}%
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 11
+  \includegraphics{Rplot1148}
+     \subcaption{Cluster 2 - Frame 1147}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 12
+  \includegraphics{Rplot597}
+     \subcaption{Cluster 3 - Frame 596}
+  \end{minipage}
+
+  \caption{}\label{fig:123}
+\end{figure}
+
+It almost seems here that cluster 1 is when players are furthest away, cluster 3 is when they are the closest, and cluster 2 is the middle ground. 
+
+\subsection{k-means Results}
+C(g) had its absolute maximum at g = 4 clusters here. \\
+
+I will take 3 randomly-drawn sample of the TimePoints in each cluster:
+<<eval=F>>=
+set.seed(5)
+ClusterSample(lbl.kmeans.opt,3)
+@
+
+\clearpage
+
+\begin{figure}[h]
+  \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 1
+  \includegraphics{Rplot159}
+     \subcaption{Cluster 1 - Frame 158}
+  \end{minipage}%
+  \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 2
+  \includegraphics{Rplot260}
+     \subcaption{Cluster 2 - Frame 259}
+  \end{minipage}
+    \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 3
+  \includegraphics{Rplot448}
+     \subcaption{Cluster 3 - Frame 447}
+  \end{minipage}
+    \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 4
+  \includegraphics{Rplot602}
+     \subcaption{Cluster 4 - Frame 601}
+  \end{minipage}
+    \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 5
+  \includegraphics{Rplot596}
+     \subcaption{Cluster 1 - Frame 595}
+  \end{minipage}
+    \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 6
+  \includegraphics{Rplot21}
+     \subcaption{Cluster 2 - Frame 20}
+  \end{minipage}
+  \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 7
+  \includegraphics{Rplot665}
+     \subcaption{Cluster 3 - Frame 664}
+  \end{minipage}%
+  \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 8
+  \includegraphics{Rplot796}
+     \subcaption{Cluster 4 - Frame 795}
+  \end{minipage}
+    \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 9
+  \includegraphics{Rplot999}
+     \subcaption{Cluster 1 - Frame 998}
+  \end{minipage}
+  \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 10
+  \includegraphics{Rplot1137}
+     \subcaption{Cluster 2 - Frame 1136}
+  \end{minipage}%
+  \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 11
+  \includegraphics{Rplot894}
+     \subcaption{Cluster 3 - Frame 893}
+  \end{minipage}
+    \begin{minipage}[b]{.24\linewidth}
+     \centering
+     % plot 12
+  \includegraphics{Rplot940}
+     \subcaption{Cluster 4 - Frame 939}
+  \end{minipage}
+
+  \caption{}\label{fig:124}
+\end{figure}
+
+The position plots here make it a little harder to determine what the clusters may represent. It's worth noting that cluster 1 here does not have a optimal pairing with the centroid clustering's results, nor does cluster 4. Only clusters 2 and 3, and they do seem to just different gradients of closeness.
+
+\section{Conclusions}
+I cannot say which clustering method was objectively better than the other between complete linkage, centroid clustering, and kmeans without further study, but centroid clustering and kmeans produced the most similar results. Single linkage had almost every point in a single cluster, so it was probably not a good method to use for my dataset.\\
+
+Clustering may have been improved by using a different method (such as PAM), or by including more relevant features or even just our maximum feature. One relevant feature may be hero damage rate. Teamfights are naturally times when players are dealing the most damage to each other in a short period of time, so including the rate of Hero (or player) damage may significantly separate teamfights versus other events. Unfortunately, I would need to do more parsing of the original replay file to find that information, but it's a goal I could work towards.
+
+\cleardoublepage
+%appendix starts here
+\appendix
+\section{Single Linkage Dendrogram}
+\label{appendix:SLDendro}
+\begin{figure}[h]
+\begin{center}
+<<label=figSL,fig=TRUE,echo=FALSE>>=
+<<SingleLDendronoskip>>
+@
+\end{center}
+\caption{Single Linkage Dendrogram}
+\label{fig:four}
+\end{figure}
+
+\clearpage
+
+\section{Only Every 5th Point}
+\label{appendix:5thPointDendros}
+
+\begin{figure}[h]
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 1
+<<label=figComp5th,fig=TRUE,echo=FALSE>>=
+<<CompleteLDendroskip>>
+@
+     \subcaption{Complete Linkage Dendrogram}\label{fig:1a}
+  \end{minipage}%
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+     % plot 2
+<<label=figCent5th,fig=TRUE,echo=FALSE>>=
+<<CentroidLDendroskip>>
+@
+     \subcaption{Centroid Clustering Dendrogram}\label{fig:1b}
+  \end{minipage}
+  \caption{Complete and Centroid Dendrograms: With only every 5th point included}\label{fig:4}
+\end{figure}
+
+\clearpage
+
+\section{Complete Linkage Results}
+When using the adequacy index C(g), we found that the 'optimal' number of clusters is 12.
+
+<<>>=
+table(lbl.complete$Best.partition)
+@
+
+\label{appendix:12ClusterGraph}
+\begin{figure}[h]
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 1
+  \includegraphics{Rplot11}
+     \subcaption{Cluster 1 - Frame 10}\label{fig:1a}
+  \end{minipage}%
+  \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 2
+  \includegraphics{Rplot860}
+     \subcaption{Cluster 2 - Frame 859}\label{fig:1b}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 3
+  \includegraphics{Rplot707}
+     \subcaption{Cluster 3 - Frame 706}\label{fig:1c}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 4
+  \includegraphics{Rplot721}
+     \subcaption{Cluster 4 - Frame 720}\label{fig:1d}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 5
+  \includegraphics{Rplot338}
+     \subcaption{Cluster 5 - Frame 337}\label{fig:1e}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 6
+  \includegraphics{Rplot1179}
+     \subcaption{Cluster 6 - Frame 1178}\label{fig:1f}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 7
+  \includegraphics{Rplot742}
+     \subcaption{Cluster 7 - Frame 741}\label{fig:1g}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 8
+  \includegraphics{Rplot994}
+     \subcaption{Cluster 8 - Frame 993}\label{fig:1h}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 9
+  \includegraphics{Rplot335}
+     \subcaption{Cluster 9 - Frame 334}\label{fig:1i}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 10
+  \includegraphics{Rplot261}
+     \subcaption{Cluster 10 - Frame 260}\label{fig:1j}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 11
+  \includegraphics{Rplot882}
+     \subcaption{Cluster 11 - Frame 881}\label{fig:1k}
+  \end{minipage}
+    \begin{minipage}[b]{.3333\linewidth}
+     \centering
+     % plot 12
+  \includegraphics{Rplot1011}
+     \subcaption{Cluster 12 - Frame 1010}\label{fig:1l}
+  \end{minipage}
+  \caption{}\label{fig:6}
+\end{figure}
+
+This is curious, I find myself able to label most of these clusters (given the one sample) with something. It may be interesting to see whether the revealed structures here are actually better than my 3 theorized groups.
+
+\end{document}
